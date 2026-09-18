@@ -1,0 +1,25 @@
+{
+  "lastChangelogVersion": "0.85.1",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-sub-agent",
+    "npm:pi-web-access",
+    "npm:billion-context",
+    "npm:@mrclrchtr/supi-context",
+    "npm:pi-graft",
+    "npm:pi-plan"
+  ],
+  "agents": {
+    "worker": {
+      "model": "gpt-oss-20b",
+      "system_prompt": "You are a specialized code generator. Write code directly to disk and return ONLY 'SUCCESS' or 'FAILURE'."
+    }
+  },
+  "subagent": {
+    "piExecutable": "auto",
+    "maxDepth": 2,
+    "inheritEnv": true
+  },
+  "hideThinkingBlock": true,
+  "tuiMode": "regular"
+}

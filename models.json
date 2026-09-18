@@ -1,0 +1,26 @@
+{
+  "providers": {
+    "freetoken": {
+      "baseUrl": "http://localhost:1919/v1",
+      "api": "openai-completions",
+      "apiKey": "lm-studio",
+      "models": [
+        {
+          "id": "gtp-oss-20b",
+          "input": ["text"]
+        }
+      ]
+    },
+    "beast": {
+      "baseUrl": "http://192.168.3.107:1919/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        {
+          "id": "Qwen3.6.35B.A3B.NVFP4",
+          "input": ["text"]
+        }
+      ]
+    }
+  }
+}
