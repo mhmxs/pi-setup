@@ -1,5 +1,6 @@
 .aider*
 .headless/
+.venv/
 npm/
 sessions/
 tmp/

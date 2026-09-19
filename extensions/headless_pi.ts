@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import * as crypto from "crypto";
 import * as headlessOutput from "./headless_output.cjs";
 
@@ -81,8 +82,8 @@ export default function (pi: any) {
         ? path.resolve(args.cwd)
         : process.cwd();
 
-      // Ensure local .headless log directory exists
-      const headlessDir = path.join(targetCwd, ".headless");
+      // Ensure global ~/.pi/agent/.headless directory exists
+      const headlessDir = path.join(os.homedir(), ".pi", "agent", ".headless");
       if (!fs.existsSync(headlessDir)) {
         fs.mkdirSync(headlessDir, { recursive: true });
       }
@@ -100,36 +101,52 @@ export default function (pi: any) {
       const formattedPrompt = `Execute the necessary tool or shell commands to complete the request below.\n\nPrompt: ${cleanPrompt}`;
 
       return new Promise((resolve) => {
-        // Save log with metadata, prompt, followed by raw stdout/stderr output
-        const saveLog = (rawData: string, metadata: Record<string, unknown> = {}) => {
-          const logContent = `METADATA: ${JSON.stringify({
-            runId,
-            cwd: targetCwd,
-            provider,
-            model,
-            ...metadata
-          }, null, 2)}\n\nPROMPT: ${cleanPrompt}\n\n${rawData}`;
-          try {
-            fs.writeFileSync(logPath, logContent, "utf-8");
-          } catch (err) {
-            // Ignore write errors to prevent blowing up process return
-          }
-        };
+        // Stream raw execution output directly to disk
+        const logStream = fs.createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
 
-        const dumpErrorAndResolve = (errorMessage: string, rawData: string, metadata: Record<string, unknown> = {}) => {
-          saveLog(rawData, {
-            status: "error",
+        const initialHeader = `METADATA: ${JSON.stringify({
+          runId,
+          cwd: targetCwd,
+          provider,
+          model
+        }, null, 2)}\n\nPROMPT: ${cleanPrompt}\n\n--- RAW OUTPUT START ---\n`;
+        
+        logStream.write(initialHeader);
+
+        const finalizeLogAndResolve = (
+          errorMessage: string | null,
+          metadata: Record<string, unknown> = {},
+          finalAnswer: string = ""
+        ) => {
+          const footer = `\n--- RAW OUTPUT END ---\n\nFINAL METADATA: ${JSON.stringify({
+            status: errorMessage ? "error" : "success",
             errorMessage,
             ...metadata
-          });
-          return resolve({
+          }, null, 2)}\n`;
+
+          logStream.write(footer);
+          logStream.end();
+
+          if (errorMessage) {
+            return resolve({
+              content: [
+                {
+                  type: "text",
+                  text: `${errorMessage}\n\nFull response logged to: ${logPath}`
+                }
+              ],
+              isError: true
+            });
+          }
+
+          resolve({
             content: [
               {
                 type: "text",
-                text: `${errorMessage}\n\nFull response logged to: ${logPath}`
+                text: `${finalAnswer}\n\n(Run ID: ${runId})`
               }
             ],
-            isError: true
+            isError: false
           });
         };
 
@@ -146,36 +163,33 @@ export default function (pi: any) {
           stdio: ["pipe", "pipe", "pipe"]
         });
 
-        let output = "";
+        let accumulatedOutput = "";
 
         child.stdin.end();
 
         const TIMEOUT_MS = 10 * 60 * 1000;
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
-          dumpErrorAndResolve("Execution timed out after 10 minutes.", output, {
-            timeoutMs: TIMEOUT_MS
-          });
+          finalizeLogAndResolve("Execution timed out after 10 minutes.", { timeoutMs: TIMEOUT_MS });
         }, TIMEOUT_MS);
 
-        child.stdout.on("data", (chunk) => {
-          output += chunk.toString();
-        });
+        const handleData = (chunk: Buffer) => {
+          const str = chunk.toString();
+          accumulatedOutput += str;
+          logStream.write(str);
+        };
 
-        child.stderr.on("data", (chunk) => {
-          output += chunk.toString();
-        });
+        child.stdout.on("data", handleData);
+        child.stderr.on("data", handleData);
 
         child.on("close", (code) => {
           clearTimeout(timer);
 
-          const cleanText = headlessOutput.stripAnsi(output);
+          const cleanText = headlessOutput.stripAnsi(accumulatedOutput);
 
           const errors = [...cleanText.matchAll(new RegExp(/reflections allowed, stopping/i, "g"))];
           if (errors.length !== 0) {
-            return dumpErrorAndResolve("Error: Max reflections allowed, stopping.", output, {
-              exitCode: code
-            });
+            return finalizeLogAndResolve("Error: Max reflections allowed, stopping.", { exitCode: code });
           }
 
           // Parse NDJSON lines from worker output
@@ -190,7 +204,6 @@ export default function (pi: any) {
               const event = JSON.parse(trimmed);
 
               if (event.type === "agent_end" && Array.isArray(event.messages)) {
-                // Find the assistant message in agent_end
                 const assistantMsg = event.messages
                   .slice()
                   .reverse()
@@ -215,31 +228,15 @@ export default function (pi: any) {
             const errReason = code !== 0
               ? `Worker process exited with code ${code}.`
               : "Worker completed, but no valid answer could be extracted from JSON output.";
-            return dumpErrorAndResolve(`Error: ${errReason}`, output, {
-              exitCode: code
-            });
+            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code });
           }
 
-          // Save log for successful execution
-          saveLog(output, {
-            status: "success",
-            exitCode: code
-          });
-
-          resolve({
-            content: [
-              {
-                type: "text",
-                text: `${finalAnswer}\n\n(Run ID: ${runId})`
-              }
-            ],
-            isError: false
-          });
+          finalizeLogAndResolve(null, { exitCode: code }, finalAnswer);
         });
 
         child.on("error", (err) => {
           clearTimeout(timer);
-          dumpErrorAndResolve(`Failed to spawn worker process: ${err.message}`, output, {
+          finalizeLogAndResolve(`Failed to spawn worker process: ${err.message}`, {
             spawnError: err.message
           });
         });

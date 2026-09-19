@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.18.0/.schema/devbox.schema.json",
+  "packages": [
+    "nodejs@latest",
+    "python3@latest"
+  ],
+  "shell": {
+    "scripts": {
+      "test-headless-output": [
+        "node --test tests/headless_output.test.cjs"
+      ],
+      "test-headless-pi": [
+        "node tests/headless_pi.test.cjs"
+      ],
+      "test": [
+        "node tests/headless_pi.test.cjs",
+        "node --test tests/headless_output.test.cjs"
+      ],
+      "run-extension": [
+        "pi -ne -e ./extensions/headless_pi.ts"
+      ]
+    }
+  }
+}
