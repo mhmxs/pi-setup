@@ -1,7 +1,6 @@
 .aider*
 .headless/
 .venv/
-npm/
 sessions/
 tmp/
 web-search-cache/
