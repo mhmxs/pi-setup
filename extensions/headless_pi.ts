@@ -41,11 +41,6 @@ export default function (pi: any) {
               return rawArgs[key];
             }
           }
-          for (const val of Object.values(rawArgs)) {
-            if (typeof val === "string" && val.trim() && !val.startsWith("call_")) {
-              return val;
-            }
-          }
         }
 
         if (typeof rawArgs === "string" && !rawArgs.startsWith("call_")) {
@@ -63,7 +58,7 @@ export default function (pi: any) {
       let cleanPrompt = extractPrompt(args, context).trim();
 
       if (!cleanPrompt && typeof args === "string" && args.startsWith("call_")) {
-        cleanPrompt = "list parent folder";
+        cleanPrompt = "";
       }
 
       if (!cleanPrompt) {
@@ -105,6 +100,7 @@ export default function (pi: any) {
         .replace(/\r\n/g, "\n")
         .replace(/\r/g, "\n")
         .split("\n")
+        .map((line: string) => line.trimEnd())
         .filter((line: string) => line.trim())
         .slice(-2)
         .join("\n");
@@ -119,8 +115,11 @@ export default function (pi: any) {
           provider,
           model
         }, null, 2)}\n\nPROMPT: ${cleanPrompt}\n\n--- RAW OUTPUT START ---\n`;
-        
+
         logStream.write(initialHeader);
+
+        let isSettled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
 
         const finalizeLogAndResolve = (
           errorMessage: string | null,
@@ -128,39 +127,51 @@ export default function (pi: any) {
           finalAnswer: string = "",
           outputTail: string = ""
         ) => {
-          const footer = `\n--- RAW OUTPUT END ---\n\nFINAL METADATA: ${JSON.stringify({
+          if (isSettled) return;
+          isSettled = true;
+
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+
+          const finalMetadata: Record<string, unknown> = {
+            runId,
+            logPath,
             status: errorMessage ? "error" : "success",
             errorMessage,
             ...metadata
-          }, null, 2)}\n`;
+          };
+
+          if (finalAnswer) {
+            finalMetadata.finalAnswer = finalAnswer;
+          }
+
+          if (outputTail) {
+            finalMetadata.lastOutputLines = outputTail;
+          }
+
+          if (errorMessage) {
+            finalMetadata.displayMessage = [
+              errorMessage,
+              outputTail ? `Last output lines:\n${outputTail}` : "",
+              `Full response logged to: ${logPath}`
+            ].filter(Boolean).join("\n\n");
+          }
+
+          const footer = `\n--- RAW OUTPUT END ---\n\nFINAL METADATA: ${JSON.stringify(finalMetadata, null, 2)}\n`;
 
           logStream.write(footer);
           logStream.end();
-
-          if (errorMessage) {
-            const outputTailSection = outputTail
-              ? `\n\nLast output lines:\n${outputTail}`
-              : "";
-
-            return resolve({
-              content: [
-                {
-                  type: "text",
-                  text: `${errorMessage}${outputTailSection}\n\nFull response logged to: ${logPath}`
-                }
-              ],
-              isError: true
-            });
-          }
 
           resolve({
             content: [
               {
                 type: "text",
-                text: `${finalAnswer}\n\n(Run ID: ${runId})`
+                text: JSON.stringify(finalMetadata, null, 2)
               }
             ],
-            isError: false
+            isError: Boolean(errorMessage)
           });
         };
 
@@ -182,7 +193,7 @@ export default function (pi: any) {
         child.stdin.end();
 
         const TIMEOUT_MS = 10 * 60 * 1000;
-        const timer = setTimeout(() => {
+        timer = setTimeout(() => {
           child.kill("SIGKILL");
           finalizeLogAndResolve(
             "Execution timed out after 10 minutes.",
@@ -202,8 +213,6 @@ export default function (pi: any) {
         child.stderr.on("data", handleData);
 
         child.on("close", (code) => {
-          clearTimeout(timer);
-
           const cleanText = headlessOutput.stripAnsi(accumulatedOutput);
           const outputTail = extractLastOutputLines(cleanText);
 
@@ -215,6 +224,31 @@ export default function (pi: any) {
           // Parse NDJSON lines from worker output
           const lines = cleanText.split(/\r?\n/);
           let finalAnswer = "";
+          let responseErrorMessage = "";
+          let responseStopReason = "";
+
+          const captureAssistantMessage = (assistantMsg: any) => {
+            if (!assistantMsg || assistantMsg.role !== "assistant") return;
+
+            if (typeof assistantMsg.errorMessage === "string" && assistantMsg.errorMessage.trim()) {
+              responseErrorMessage = assistantMsg.errorMessage.trim();
+            }
+
+            if (typeof assistantMsg.stopReason === "string" && assistantMsg.stopReason.trim()) {
+              responseStopReason = assistantMsg.stopReason.trim();
+            }
+
+            if (Array.isArray(assistantMsg.content)) {
+              const textBlocks = assistantMsg.content
+                .filter((c: any) => c.type === "text" && typeof c.text === "string")
+                .map((c: any) => c.text)
+                .filter(Boolean);
+
+              if (textBlocks.length > 0) {
+                finalAnswer = textBlocks.join("\n").trim();
+              }
+            }
+          };
 
           for (const line of lines) {
             const trimmed = line.trim();
@@ -223,39 +257,47 @@ export default function (pi: any) {
             try {
               const event = JSON.parse(trimmed);
 
+              if (event.type === "message_end" && event.message?.role === "assistant") {
+                captureAssistantMessage(event.message);
+              }
+
               if (event.type === "agent_end" && Array.isArray(event.messages)) {
                 const assistantMsg = event.messages
                   .slice()
                   .reverse()
                   .find((m: any) => m.role === "assistant");
 
-                if (assistantMsg && Array.isArray(assistantMsg.content)) {
-                  const textBlocks = assistantMsg.content
-                    .filter((c: any) => c.type === "text" && typeof c.text === "string")
-                    .map((c: any) => c.text);
-
-                  if (textBlocks.length > 0) {
-                    finalAnswer = textBlocks.join("\n").trim();
-                  }
-                }
+                captureAssistantMessage(assistantMsg);
               }
             } catch (e) {
               // Ignore invalid JSON lines
             }
           }
 
+          if (!finalAnswer) {
+            finalAnswer = headlessOutput.extractHeadlessFinalAnswer(cleanText);
+          }
+
+          const responseFailure = responseErrorMessage
+            || ((responseStopReason === "error" || responseStopReason === "aborted")
+              ? `Worker reported stopReason "${responseStopReason}" without an errorMessage.`
+              : "");
+
+          if (responseFailure) {
+            return finalizeLogAndResolve(responseFailure, { exitCode: code, stopReason: responseStopReason }, "", outputTail);
+          }
+
           if (code !== 0 || !finalAnswer) {
             const errReason = code !== 0
               ? `Worker process exited with code ${code}.`
               : "Worker completed, but no valid answer could be extracted from JSON output.";
-            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code }, "", outputTail);
+            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code, stopReason: responseStopReason }, "", outputTail);
           }
 
-          finalizeLogAndResolve(null, { exitCode: code }, finalAnswer);
+          finalizeLogAndResolve(null, { exitCode: code, stopReason: responseStopReason }, finalAnswer);
         });
 
         child.on("error", (err) => {
-          clearTimeout(timer);
           finalizeLogAndResolve(`Failed to spawn worker process: ${err.message}`, {
             spawnError: err.message
           }, "", extractLastOutputLines(accumulatedOutput));
