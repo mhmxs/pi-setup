@@ -5,7 +5,6 @@ graft/.cache/
 graft/.graph/
 .headless/
 .venv/
-npm/
 sessions/
 tmp/
 web-search-cache/

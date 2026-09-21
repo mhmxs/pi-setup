@@ -18,9 +18,8 @@ This repository provides a lightweight controller‑to‑headless‑worker archi
    --mode json --no-extensions --extension npm:pi-graft --no-session
    ```
 4. Sends a formatted prompt: `Execute the necessary tool or shell commands to complete the request below.` followed by `Prompt: <cleanPrompt>`.
-5. Environment variables: `CI=true`, `PYTHONUNBUFFERED=1`, `TERM=xterm-256color`.
-6. Timeout: 10 minutes.
-7. Parses NDJSON output, looks for `agent_end`, extracts the final assistant text, and returns it with the run ID.
+5. Timeout: 10 minutes.
+6. Parses NDJSON output, looks for `agent_end`, extracts the final assistant text, and returns it with the run ID.
 
 ## Workflow
 1. **Orchestrator** – The master prompt orchestrates the overall task, calls Graft, and delegates each file edit to `run_headless_pi`.

@@ -100,6 +100,15 @@ export default function (pi: any) {
 
       const formattedPrompt = `Execute the necessary tool or shell commands to complete the request below.\n\nPrompt: ${cleanPrompt}`;
 
+      const extractLastOutputLines = (rawOutput: string): string => headlessOutput
+        .stripAnsi(String(rawOutput || ""))
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .split("\n")
+        .filter((line: string) => line.trim())
+        .slice(-2)
+        .join("\n");
+
       return new Promise((resolve) => {
         // Stream raw execution output directly to disk
         const logStream = fs.createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
@@ -116,7 +125,8 @@ export default function (pi: any) {
         const finalizeLogAndResolve = (
           errorMessage: string | null,
           metadata: Record<string, unknown> = {},
-          finalAnswer: string = ""
+          finalAnswer: string = "",
+          outputTail: string = ""
         ) => {
           const footer = `\n--- RAW OUTPUT END ---\n\nFINAL METADATA: ${JSON.stringify({
             status: errorMessage ? "error" : "success",
@@ -128,11 +138,15 @@ export default function (pi: any) {
           logStream.end();
 
           if (errorMessage) {
+            const outputTailSection = outputTail
+              ? `\n\nLast output lines:\n${outputTail}`
+              : "";
+
             return resolve({
               content: [
                 {
                   type: "text",
-                  text: `${errorMessage}\n\nFull response logged to: ${logPath}`
+                  text: `${errorMessage}${outputTailSection}\n\nFull response logged to: ${logPath}`
                 }
               ],
               isError: true
@@ -170,7 +184,12 @@ export default function (pi: any) {
         const TIMEOUT_MS = 10 * 60 * 1000;
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
-          finalizeLogAndResolve("Execution timed out after 10 minutes.", { timeoutMs: TIMEOUT_MS });
+          finalizeLogAndResolve(
+            "Execution timed out after 10 minutes.",
+            { timeoutMs: TIMEOUT_MS },
+            "",
+            extractLastOutputLines(accumulatedOutput)
+          );
         }, TIMEOUT_MS);
 
         const handleData = (chunk: Buffer) => {
@@ -186,10 +205,11 @@ export default function (pi: any) {
           clearTimeout(timer);
 
           const cleanText = headlessOutput.stripAnsi(accumulatedOutput);
+          const outputTail = extractLastOutputLines(cleanText);
 
           const errors = [...cleanText.matchAll(new RegExp(/reflections allowed, stopping/i, "g"))];
           if (errors.length !== 0) {
-            return finalizeLogAndResolve("Error: Max reflections allowed, stopping.", { exitCode: code });
+            return finalizeLogAndResolve("Error: Max reflections allowed, stopping.", { exitCode: code }, "", outputTail);
           }
 
           // Parse NDJSON lines from worker output
@@ -228,7 +248,7 @@ export default function (pi: any) {
             const errReason = code !== 0
               ? `Worker process exited with code ${code}.`
               : "Worker completed, but no valid answer could be extracted from JSON output.";
-            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code });
+            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code }, "", outputTail);
           }
 
           finalizeLogAndResolve(null, { exitCode: code }, finalAnswer);
@@ -238,7 +258,7 @@ export default function (pi: any) {
           clearTimeout(timer);
           finalizeLogAndResolve(`Failed to spawn worker process: ${err.message}`, {
             spawnError: err.message
-          });
+          }, "", extractLastOutputLines(accumulatedOutput));
         });
       });
     }
