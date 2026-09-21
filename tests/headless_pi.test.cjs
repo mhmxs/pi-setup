@@ -26,3 +26,17 @@ test("worker output falls back to marker-based final answer extraction when NDJS
   assert.match(source, /finalAnswer\s*=\s*headlessOutput\.extractHeadlessFinalAnswer\(cleanText\)/, "expected a fallback to marker-based final answer extraction");
   assert.match(source, /extractHeadlessFinalAnswer\(cleanText\)[\s\S]*?Worker completed, but no valid answer could be extracted from JSON output\./, "expected the no-answer error to happen only after the fallback extraction attempt");
 });
+
+test("clarification-only runs are detected as needs_input instead of success", () => {
+  assert.match(source, /status:\s*"needs_input"/, "expected a dedicated needs_input status for incomplete runs");
+  assert.match(source, /taskCompleted:\s*false/, "expected incomplete clarification runs to mark taskCompleted false");
+  assert.match(source, /Worker requested additional input before completing the task\./, "expected a stable machine-detectable clarification failure message");
+});
+
+test("needs_input detection uses both tool execution evidence and clarification heuristics", () => {
+  assert.match(source, /toolExecutionCount\s*=\s*0;/, "expected worker parsing to track whether any tool execution occurred");
+  assert.match(source, /event\.type\s*===\s*"tool_execution_end"/, "expected explicit tool execution events to count toward task completion evidence");
+  assert.match(source, /const\s+looksLikeClarificationRequest\s*=\s*\(text: string\): boolean =>/, "expected a dedicated clarification classifier");
+  assert.match(source, /but i\[’'\]ll need/i, "expected clarification heuristics to catch answers that say but I'll need more information");
+  assert.match(source, /toolExecutionCount\s*===\s*0[\s\S]*looksLikeClarificationRequest\(finalAnswer\)/, "expected needs_input to require both no tool execution and a clarification-style answer");
+});

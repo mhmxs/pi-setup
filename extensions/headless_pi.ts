@@ -105,6 +105,16 @@ export default function (pi: any) {
         .slice(-2)
         .join("\n");
 
+      const looksLikeClarificationRequest = (text: string): boolean => {
+        const normalized = String(text || "").trim().toLowerCase();
+        if (!normalized) return false;
+
+        const clarificationPattern = /\b(i need\b.*\b(detail|details|info|information|clarification)\b|but i[’']ll need\b|need a bit more detail|please provide|could you clarify|can you clarify|what path|what filename|which path|which file|which filename)\b/i;
+        if (clarificationPattern.test(normalized)) return true;
+
+        return normalized.endsWith("?") && /^(what|which|where|who|could you|can you|please provide)\b/i.test(normalized);
+      };
+
       return new Promise((resolve) => {
         // Stream raw execution output directly to disk
         const logStream = fs.createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
@@ -140,6 +150,7 @@ export default function (pi: any) {
             logPath,
             status: errorMessage ? "error" : "success",
             errorMessage,
+            taskCompleted: !errorMessage,
             ...metadata
           };
 
@@ -171,7 +182,7 @@ export default function (pi: any) {
                 text: JSON.stringify(finalMetadata, null, 2)
               }
             ],
-            isError: Boolean(errorMessage)
+            isError: finalMetadata.status !== "success"
           });
         };
 
@@ -226,6 +237,7 @@ export default function (pi: any) {
           let finalAnswer = "";
           let responseErrorMessage = "";
           let responseStopReason = "";
+          let toolExecutionCount = 0;
 
           const captureAssistantMessage = (assistantMsg: any) => {
             if (!assistantMsg || assistantMsg.role !== "assistant") return;
@@ -261,6 +273,10 @@ export default function (pi: any) {
                 captureAssistantMessage(event.message);
               }
 
+              if (event.type === "tool_execution_end") {
+                toolExecutionCount += 1;
+              }
+
               if (event.type === "agent_end" && Array.isArray(event.messages)) {
                 const assistantMsg = event.messages
                   .slice()
@@ -284,17 +300,33 @@ export default function (pi: any) {
               : "");
 
           if (responseFailure) {
-            return finalizeLogAndResolve(responseFailure, { exitCode: code, stopReason: responseStopReason }, "", outputTail);
+            return finalizeLogAndResolve(responseFailure, { exitCode: code, stopReason: responseStopReason, toolExecutionCount }, "", outputTail);
+          }
+
+          if (toolExecutionCount === 0 && looksLikeClarificationRequest(finalAnswer)) {
+            return finalizeLogAndResolve(
+              "Worker requested additional input before completing the task.",
+              {
+                status: "needs_input",
+                taskCompleted: false,
+                exitCode: code,
+                stopReason: responseStopReason,
+                toolExecutionCount,
+                needsInput: true
+              },
+              finalAnswer,
+              outputTail
+            );
           }
 
           if (code !== 0 || !finalAnswer) {
             const errReason = code !== 0
               ? `Worker process exited with code ${code}.`
               : "Worker completed, but no valid answer could be extracted from JSON output.";
-            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code, stopReason: responseStopReason }, "", outputTail);
+            return finalizeLogAndResolve(`Error: ${errReason}`, { exitCode: code, stopReason: responseStopReason, toolExecutionCount }, "", outputTail);
           }
 
-          finalizeLogAndResolve(null, { exitCode: code, stopReason: responseStopReason }, finalAnswer);
+          finalizeLogAndResolve(null, { exitCode: code, stopReason: responseStopReason, toolExecutionCount, taskCompleted: true }, finalAnswer);
         });
 
         child.on("error", (err) => {
