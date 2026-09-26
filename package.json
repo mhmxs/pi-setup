@@ -1,5 +1,6 @@
 {
   "dependencies": {
-    "@receptron/laya": "^0.1.2"
+    "@receptron/laya": "^0.1.2",
+    "@kubernetes/client-node": "^2.0.0"
   }
 }
