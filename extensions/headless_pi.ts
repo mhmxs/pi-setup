@@ -32,6 +32,21 @@ export default function (pi: any) {
       required: ["prompt"]
     },
     execute: async (args: any, context: any) => {
+      const isToolParamsObject = (value: any): value is Record<string, unknown> => {
+        if (!value || typeof value !== "object") return false;
+
+        return ["prompt", "command", "task", "instruction", "text", "cwd", "provider", "model"]
+          .some((key) => key in value);
+      };
+
+      const toolParams = isToolParamsObject(args)
+        ? args
+        : isToolParamsObject(context?.args)
+          ? context.args
+          : isToolParamsObject(context)
+            ? context
+            : null;
+
       const extractPrompt = (rawArgs: any, ctx: any): string => {
         if (!rawArgs) return "";
 
@@ -55,7 +70,7 @@ export default function (pi: any) {
         return "";
       };
 
-      let cleanPrompt = extractPrompt(args, context).trim();
+      let cleanPrompt = extractPrompt(toolParams ?? args, context).trim();
 
       if (!cleanPrompt && typeof args === "string" && args.startsWith("call_")) {
         cleanPrompt = "";
@@ -73,8 +88,8 @@ export default function (pi: any) {
         };
       }
 
-      const targetCwd = args && typeof args === "object" && args.cwd
-        ? path.resolve(args.cwd)
+      const targetCwd = toolParams && typeof toolParams.cwd === "string"
+        ? path.resolve(toolParams.cwd)
         : process.cwd();
 
       // Ensure global ~/.pi/agent/.headless directory exists
@@ -86,12 +101,12 @@ export default function (pi: any) {
       const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}_${crypto.randomBytes(3).toString("hex")}`;
       const logPath = path.join(headlessDir, `${runId}.log`);
 
-      const provider = args && typeof args === "object" && args.provider
-        ? String(args.provider)
-        : "freetoken";
-      const model = args && typeof args === "object" && args.model
-        ? String(args.model)
-        : "gtp-oss-20b";
+      const provider = toolParams && typeof toolParams.provider === "string"
+        ? String(toolParams.provider)
+        : "github-copilot";
+      const model = toolParams && typeof toolParams.model === "string"
+        ? String(toolParams.model)
+        : "gpt-5-mini";
 
       const formattedPrompt = `Execute the necessary tool or shell commands to complete the request below.\n\nPrompt: ${cleanPrompt}`;
 

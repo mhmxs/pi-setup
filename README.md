@@ -1,43 +1,67 @@
-# Headless Master/Worker Setup
+# Headless orchestration prompts and extensions
 
 ## Overview
-This repository provides a lightweight controller‑to‑headless‑worker architecture for running AI‑powered code edits. The core is the `run_headless_pi` tool, which spawns a headless `pi` process, executes prompts, and returns the final assistant text.
+This repo defines a prompt-and-tool workflow for delegating coding tasks to headless `pi` runs: an orchestrator plans micro-steps, a worker executes focused edits, and helper extensions provide execution and decision checkpoints.
 
-## Components
-- **`extensions/headless_pi.ts`** – Implements `run_headless_pi`.
-- **`prompts/orchestrator.md`** – Master controller prompt that uses Graft first and delegates edits to `run_headless_pi`.
-- **`prompts/worker.md`** – Single‑file worker prompt that inspects the target, runs tests, implements the file, and refreshes Graft metadata.
-- **`prompts/headless.md`** – Lightweight wrapper around `run_headless_pi` that sets the current directory and handles failures.
-- **Graft graph** – Provides code location, call edges, and API signatures.
+## Prompt files
+- `prompts/orchestrator.md`
+  - Master controller prompt.
+  - Enforces **Graft-first orchestration** before dispatching work.
+  - Requires **all edits** to be delegated through `run_headless_pi`.
+  - Requires explicit `decision_maker` checkpoints at branch points (tool choice, retries, step escalation, snippet requests, non-edit delegation).
+  - Requires a **second `decision_maker` call** to choose the GitHub Copilot model, then passing `provider: github-copilot` and `model` on delegated runs.
+  - Caps plans to small micro-steps and keeps prompts tightly scoped.
 
-## How `run_headless_pi` works
-1. Accepts a required `prompt` and optional `cwd`, `provider`, `model`.
-2. Defaults: `cwd` = process cwd, `provider` = `freetoken`, `model` = `gtp-oss-20b`.
-3. Spawns `pi` via `python3` + `pty.spawn(...)` with flags:
-   ```
-   --mode json --no-extensions --extension npm:pi-graft --no-session
-   ```
-4. Sends a formatted prompt: `Execute the necessary tool or shell commands to complete the request below.` followed by `Prompt: <cleanPrompt>`.
-5. Timeout: 10 minutes.
-6. Parses NDJSON output, looks for `agent_end`, extracts the final assistant text, and returns it with the run ID.
+- `prompts/headless.md`
+  - Thin wrapper around a single `run_headless_pi` call.
+  - Accepts optional `provider=<name>`, `model=<id>`, and `cwd=<path>` prefixes.
+  - Forwards those values into structured tool args (not embedded in the prompt body).
+  - Halts immediately on failure (no log forensics in-prompt).
 
-## Workflow
-1. **Orchestrator** – The master prompt orchestrates the overall task, calls Graft, and delegates each file edit to `run_headless_pi`.
-2. **Worker** – For each target file, the worker prompt inspects the file with Graft, runs tests first, implements the change, and refreshes Graft metadata.
-3. **Headless Wrapper** – `prompts/headless.md` invokes `run_headless_pi` in the current directory; on failure it halts and reports the error.
+- `prompts/worker.md`
+  - Single-file worker prompt.
+  - Oriented around targeted inspection, TDD-style test/implementation flow, and concise completion output.
 
-## Logging and Failure Behavior
-- Logs are written to `~/.pi/agent/.headless/<runId>.log`.
-- Failure cases: missing prompt, timeout, spawn failure, non‑zero exit, no extractable final answer, or `reflections allowed, stopping`.
-- On failure, the tool returns an error message and the log path; the headless wrapper does not inspect logs further.
+## Extension files
+- `extensions/headless_pi.ts`
+  - Registers `run_headless_pi`.
+  - Args: required `prompt`, optional `cwd`, `provider`, `model`.
+  - Defaults: `cwd = process.cwd()`, `provider = github-copilot`, `model = gpt-5-mini`.
+  - Spawns `pi` in JSON mode with no session and only `npm:pi-graft` loaded:
+    - `--mode json --no-extensions --extension npm:pi-graft --no-session`
 
-## Example Usage
-```bash
-# Run a headless edit on a target file
-pi run_headless_pi --prompt "Add a new function to utils.ts" --cwd ./src
-```
-The tool will spawn `pi`, execute the prompt, and output the final assistant text along with the run ID.
+- `extensions/decision-maker.ts`
+  - Registers `decision_maker`.
+  - Uses external decisioning to choose among options at orchestration branch points.
+
+- `extensions/headless_output.cjs`
+  - Output helpers used by headless execution.
+  - Strips ANSI noise and extracts final assistant answer text from raw subprocess output.
+
+## `run_headless_pi` runtime behavior
+- Builds a structured execution prompt and runs a headless subprocess.
+- Writes execution logs to:
+  - `~/.pi/agent/.headless/<runId>.log`
+- Returns structured metadata including run ID, status, log path, completion flags, and final answer when available.
+- Surfaces clear failure metadata for cases like spawn errors, timeout, extraction failures, or non-zero worker exit.
+- Can return a `needs_input`-style failure when the worker asks for clarification before performing tool actions.
+
+## Logging and failure model
+- Every run records raw output plus final metadata in a per-run log file.
+- Error responses include a concise display message and output tail for quick triage.
+- Prompt-level wrappers are expected to stop on failure rather than continue speculative recovery.
+
+## Realistic usage example
+1. Use `prompts/orchestrator.md` to plan one micro-step for one file.
+2. Call `decision_maker` to confirm the next action.
+3. If using Copilot, call `decision_maker` again to choose a model.
+4. Dispatch one delegated run via `run_headless_pi` with:
+   - `prompt`: compact single-file instruction block
+   - `cwd`: target repo/subdir (optional)
+   - `provider`: `github-copilot` (when selected)
+   - `model`: chosen Copilot model (when selected)
+5. If the run returns `needs_input` or error status, stop and re-scope before retrying.
 
 ## Limitations
-- Only one file is edited per headless run.
-- The tool expects a clean prompt; malformed prompts result in failure.
+- The `run_headless_pi` extension itself is a general headless runner.
+- The prompts in this repo intentionally constrain operation to **single-file micro-steps** with strict scope and minimal context.
