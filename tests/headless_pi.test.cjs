@@ -16,6 +16,19 @@ test("prompt extraction fails closed instead of inventing prompts from unrelated
   assert.doesNotMatch(source, /Object\.values\(rawArgs\)/, "should not pull the prompt from arbitrary argument values");
 });
 
+test("headless prefix parsing extracts and strips leading provider/model/cwd tokens from raw strings and respects explicit args", () => {
+  // Expect a regex or replace that recognizes leading provider=, model=, and cwd= tokens in a raw string prompt
+  assert.match(source, /(?:^|\s)(?:provider|model|cwd)=/, "expected parsing of leading metadata tokens from raw string prompts");
+
+  // Expect the code to strip those tokens from the prompt before composing the worker prompt
+  assert.match(source, /cleanPrompt\s*=\s*cleanPrompt\.replace\(/, "expected metadata tokens to be removed from the worker prompt string");
+
+  // Ensure structured args take precedence when present (toolParams.cwd / toolParams.provider / toolParams.model)
+  assert.match(source, /toolParams\s*&&\s*typeof\s+toolParams\.cwd\s*===\s*\"string\"\s*\?\s*path\.resolve\(toolParams\.cwd\)/, "expected structured cwd to be preferred when provided");
+  assert.match(source, /toolParams\s*&&\s*typeof\s+toolParams\.provider\s*===\s*\"string\"\s*\?\s*String\(toolParams\.provider\)/, "expected structured provider to be preferred when provided");
+  assert.match(source, /toolParams\s*&&\s*typeof\s+toolParams\.model\s*===\s*\"string\"\s*\?\s*String\(toolParams\.model\)/, "expected structured model to be preferred when provided");
+});
+
 test("finalizeLogAndResolve is guarded so timeout, close, and error cannot settle twice", () => {
   assert.match(source, /let\s+isSettled\s*=\s*false;/, "expected a one-shot settlement flag near the shared finalize path");
   assert.match(source, /if\s*\(isSettled\)\s*return;/, "expected finalize to bail out after the first resolution");

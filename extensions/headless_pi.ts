@@ -72,6 +72,27 @@ export default function (pi: any) {
 
       let cleanPrompt = extractPrompt(toolParams ?? args, context).trim();
 
+      // If the caller passed a raw string prompt, allow leading metadata tokens like
+      // provider=, model=, and cwd= to be present and strip them out of the actual
+      // worker prompt; explicit structured args in toolParams always take precedence.
+      const metadata: Record<string, string> = {};
+      if (typeof args === "string") {
+        // Greedily parse leading provider/model/cwd tokens (allow quoted values)
+        let tmp = cleanPrompt;
+        const tokenRegex = /^\s*(provider|model|cwd)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))/i;
+        let match;
+        while ((match = tmp.match(tokenRegex))) {
+          const key = String(match[1]).toLowerCase();
+          const val = match[2] ?? match[3] ?? match[4] ?? "";
+          if (!(key in metadata)) metadata[key] = val;
+          tmp = tmp.slice(match[0].length);
+        }
+
+        // Strip any leading metadata tokens from the final prompt string (test expects a replace)
+        cleanPrompt = tmp.trim();
+        cleanPrompt = cleanPrompt.replace(/^(?:\s*(?:provider|model|cwd)\s*=\s*(?:"[^"]*"|'[^']*'|[^ \t\n\r]+)\s*)+/i, "").trim();
+      }
+
       if (!cleanPrompt && typeof args === "string" && args.startsWith("call_")) {
         cleanPrompt = "";
       }
@@ -90,7 +111,7 @@ export default function (pi: any) {
 
       const targetCwd = toolParams && typeof toolParams.cwd === "string"
         ? path.resolve(toolParams.cwd)
-        : process.cwd();
+        : (metadata.cwd ? path.resolve(metadata.cwd) : process.cwd());
 
       // Ensure global ~/.pi/agent/.headless directory exists
       const headlessDir = path.join(os.homedir(), ".pi", "agent", ".headless");
@@ -103,10 +124,10 @@ export default function (pi: any) {
 
       const provider = toolParams && typeof toolParams.provider === "string"
         ? String(toolParams.provider)
-        : "github-copilot";
+        : (metadata.provider ? String(metadata.provider) : "github-copilot");
       const model = toolParams && typeof toolParams.model === "string"
         ? String(toolParams.model)
-        : "gpt-5-mini";
+        : (metadata.model ? String(metadata.model) : "gpt-5-mini");
 
       const formattedPrompt = `Execute the necessary tool or shell commands to complete the request below.\n\nPrompt: ${cleanPrompt}`;
 
