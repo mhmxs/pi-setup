@@ -1,6 +1,21 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
+let layaPromise: Promise<any> | null = null;
+
+async function getLaya() {
+  if (!layaPromise) {
+    layaPromise = import("@receptron/laya")
+      .then(({ Laya }) => Laya.load())
+      .catch((error) => {
+        layaPromise = null;
+        throw error;
+      });
+  }
+
+  return layaPromise;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "decision_maker",
@@ -19,12 +34,8 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params) {
-      let laya: any = null;
-
       try {
-        // Dynamically import to avoid top-level require failures
-        const { Laya } = await import("@receptron/laya");
-        laya = await Laya.load();
+        const laya = await getLaya();
 
         const criteriaObj: Record<string, string> = {};
         if (params.options && params.options.length > 0) {
@@ -80,10 +91,6 @@ export default function (pi: ExtensionAPI) {
           details: { error: true },
           isError: true,
         };
-      } finally {
-        if (laya && typeof laya.close === "function") {
-          await laya.close();
-        }
       }
     },
   });
