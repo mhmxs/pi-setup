@@ -4,11 +4,11 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { Type } from 'typebox';
-import { CoreApi, KubeConfig } from '@kubernetes/client-node';
+import { CoreV1Api, KubeConfig } from '@kubernetes/client-node';
 import * as memlib from './agent-memory-lib.mjs';
 
 const DEFAULT_NAMESPACE_PATH = process.env.NS_PATH || '/var/run/secrets/kubernetes.io/serviceaccount/namespace';
-const MEMORY_NAMESPACE = process.env.MEMORY_NAMESPACE || 'default';
+const MEMORY_NAMESPACE_ENV = process.env.MEMORY_NAMESPACE || '';
 const MEMORY_DECISION_URL = process.env.MEMORY_DECISION_URL || '';
 const MEMORY_DECISION_TOKEN = process.env.MEMORY_DECISION_TOKEN || '';
 
@@ -20,8 +20,86 @@ function readNamespace() {
   }
 }
 
+function resolveNamespace() {
+  // Priority: explicit env var -> in-cluster pod namespace file -> default
+  return MEMORY_NAMESPACE_ENV || readNamespace() || 'default';
+}
+
 function shortId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function getCoreClient() {
+  const kc = new KubeConfig();
+  try {
+    kc.loadFromDefault();
+  } catch {}
+  return kc.makeApiClient(CoreV1Api);
+}
+
+const CATALOG_CONFIGMAP = 'pi-agent-memory-catalog';
+const MAX_CONFIGMAP_BYTES = 800 * 1024; // conservative limit for ConfigMap data
+
+async function readCatalogConfigMap(core: any, namespace: string): Promise<string[]> {
+  try {
+    const res: any = await core.readNamespacedConfigMap({ name: CATALOG_CONFIGMAP, namespace });
+    const raw = (res?.body?.data && res.body.data.catalog) || (res?.body?.data && res.body.data.CATALOG) || undefined;
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e: any) {
+    return [];
+  }
+}
+
+async function writeCatalogConfigMap(core: any, namespace: string, categories: string[]) {
+  const body = { metadata: { name: CATALOG_CONFIGMAP, namespace }, data: { catalog: JSON.stringify(categories) } };
+  try {
+    await core.replaceNamespacedConfigMap({ name: CATALOG_CONFIGMAP, namespace, body });
+  } catch (e: any) {
+    try {
+      await core.createNamespacedConfigMap({ namespace, body });
+    } catch (err: any) {
+      // best-effort; ignore failures
+    }
+  }
+}
+
+async function appendToBucketConfigMap(core: any, namespace: string, baseName: string, record: any) {
+  async function tryAppend(nameToUse: string) {
+    try {
+      const res: any = await core.readNamespacedConfigMap({ name: nameToUse, namespace });
+      const existingRaw = (res?.body?.data && (res.body.data.memories || res.body.data.MEMORIES)) || '[]';
+      let arr = [];
+      try { arr = JSON.parse(existingRaw); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
+      arr.push(record);
+      const serialized = JSON.stringify(arr);
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_CONFIGMAP_BYTES) return { overflow: true };
+      const body = { metadata: { name: nameToUse, namespace }, data: { memories: serialized } };
+      try {
+        await core.replaceNamespacedConfigMap({ name: nameToUse, namespace, body });
+      } catch {
+        try { await core.createNamespacedConfigMap({ namespace, body }); } catch {}
+      }
+      return { ok: true };
+    } catch (e: any) {
+      // not found -> create
+      const arr = [record];
+      const serialized = JSON.stringify(arr);
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_CONFIGMAP_BYTES) return { overflow: true };
+      const body = { metadata: { name: nameToUse, namespace }, data: { memories: serialized } };
+      try { await core.createNamespacedConfigMap({ namespace, body }); return { ok: true }; } catch (err: any) { throw err; }
+    }
+  }
+
+  // try base then -v2, -v3 ...
+  const variants = [baseName, `${baseName}-v2`, `${baseName}-v3`, `${baseName}-v4`, `${baseName}-v5`];
+  for (const v of variants) {
+    const res = await tryAppend(v);
+    if (res && (res as any).overflow) continue;
+    return res;
+  }
+  return { overflow: true };
 }
 
 async function callDecisionEndpoint(payload: any) {
@@ -39,11 +117,6 @@ async function callDecisionEndpoint(payload: any) {
   };
   if (MEMORY_DECISION_TOKEN) {
     options.headers = { ...(options.headers || {}), Authorization: `Bearer ${MEMORY_DECISION_TOKEN}` };
-  }
-
-  if (isHttps) {
-    // attempt to use in-cluster TLS settings via KubeConfig when available
-    // (best-effort; not required for the external decision endpoint)
   }
 
   const client = isHttps ? https : http;
@@ -93,19 +166,15 @@ export default function registerAgentMemory(pi: any) {
         };
       }
 
-      const MEMORY_DIR = '/root/.pi/agent/memories';
-      try { fs.mkdirSync(MEMORY_DIR, { recursive: true }); } catch {}
-      const catalogPath = path.join(MEMORY_DIR, 'catalog.json');
+      const namespace = resolveNamespace();
+      const core = getCoreClient();
 
-      // read or initialize catalog file
+      // read or initialize catalog (ConfigMap-backed)
       let categories: string[] = [];
       try {
-        const raw = fs.readFileSync(catalogPath, 'utf8');
-        categories = JSON.parse(raw);
-        if (!Array.isArray(categories)) categories = [];
+        categories = await readCatalogConfigMap(core, namespace);
       } catch {
         categories = [];
-        try { fs.writeFileSync(catalogPath, JSON.stringify(categories), 'utf8'); } catch {}
       }
 
       // build memory text for decision
@@ -133,10 +202,10 @@ export default function registerAgentMemory(pi: any) {
         };
       }
 
-      // add category to catalog if new
+      // add category to catalog if new (ConfigMap-backed)
       if (!categories.includes(category)) {
         categories.push(category);
-        try { fs.writeFileSync(catalogPath, JSON.stringify(categories), 'utf8'); } catch {}
+        try { await writeCatalogConfigMap(core, namespace, categories); } catch {}
       }
 
       // prepare memory record
@@ -151,46 +220,19 @@ export default function registerAgentMemory(pi: any) {
       };
 
       const baseName = memlib.bucketConfigMapName(category, bucket);
-      const maxBytes = 800 * 1024;
 
-      async function appendToFileName(nameToUse: string) {
-        const filename = path.join(MEMORY_DIR, `${nameToUse}.json`);
-        try {
-          let arr: any[] = [];
-          try {
-            const raw = fs.readFileSync(filename, 'utf8');
-            arr = JSON.parse(raw);
-            if (!Array.isArray(arr)) arr = [];
-          } catch {
-            arr = [];
-          }
-          arr.push(record);
-          const serialized = JSON.stringify(arr);
-          if (Buffer.byteLength(serialized, 'utf8') > maxBytes) {
-            return { overflow: true };
-          }
-          fs.writeFileSync(filename, serialized, 'utf8');
-          return { ok: true };
-        } catch (e: any) {
-          throw e;
-        }
-      }
-
-      // try append to base name, if overflow create/use -v2
       try {
-        const res = await appendToFileName(baseName);
+        const res = await appendToBucketConfigMap(core, namespace, baseName, record);
         if (res && (res as any).overflow) {
-          const v2 = `${baseName}-v2`;
-          const res2 = await appendToFileName(v2);
           return {
-            content: [{ type: 'text', text: JSON.stringify({ status: 'ok', id: record.id, storedIn: v2, category, bucket }, null, 2) }],
-            details: { status: 'ok', id: record.id, storedIn: v2, category, bucket }
+            content: [{ type: 'text', text: JSON.stringify({ status: 'error', message: 'memory exceeds ConfigMap storage limits' }, null, 2) }],
+            details: { status: 'error', message: 'memory exceeds ConfigMap storage limits' }
           };
         }
 
         return {
           content: [{ type: 'text', text: JSON.stringify({ status: 'ok', id: record.id, storedIn: baseName, category, bucket }, null, 2) }],
-          details: { status: 'ok', id: record.id, storedIn: baseName, category, bucket }
+          details: { status: 'ok', id: record.id, storedIn: baseName, category, bucket, note: 'saves are eventually consistent; use only save_memory/query_memory and do not rely on ConfigMap layout' }
         };
       } catch (e: any) {
         return {
@@ -216,16 +258,13 @@ export default function registerAgentMemory(pi: any) {
         };
       }
 
-      const MEMORY_DIR = '/root/.pi/agent/memories';
-      try { fs.mkdirSync(MEMORY_DIR, { recursive: true }); } catch {}
-      const catalogPath = path.join(MEMORY_DIR, 'catalog.json');
+      const namespace = resolveNamespace();
+      const core = getCoreClient();
 
-      // read catalog
+      // read catalog (ConfigMap-backed)
       let categories: string[] = [];
       try {
-        const raw = fs.readFileSync(catalogPath, 'utf8');
-        categories = JSON.parse(raw);
-        if (!Array.isArray(categories)) categories = [];
+        categories = await readCatalogConfigMap(core, namespace);
       } catch {
         categories = [];
       }
@@ -258,34 +297,39 @@ export default function registerAgentMemory(pi: any) {
         buckets = memlib.BUCKETS;
       }
 
-      // find matching files for category + buckets
+      // find matching ConfigMaps for category + buckets
       try {
         const encodedBuckets = buckets.map(String).map(b => b.trim()).filter(Boolean);
         const bases = encodedBuckets.map(b => memlib.bucketConfigMapName(category, b));
-        const items: string[] = [];
-        try { const files = fs.readdirSync(MEMORY_DIR); for (const f of files) { if (!f.endsWith('.json')) continue; if (f === 'catalog.json') continue; const nameNoExt = f.slice(0, -5); if (bases.some(b => nameNoExt === b || nameNoExt.startsWith(`${b}-`))) items.push(path.join(MEMORY_DIR, f)); } } catch {}
 
         const allRecords: any[] = [];
-        for (const filePath of items) {
-          try {
-            const raw = fs.readFileSync(filePath, 'utf8') || '[]';
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) allRecords.push(parsed);
-          } catch {
-            // skip bad files
+        for (const base of bases) {
+          const variants = [base, `${base}-v2`, `${base}-v3`, `${base}-v4`, `${base}-v5`];
+          for (const name of variants) {
+            try {
+              const res: any = await core.readNamespacedConfigMap({ name, namespace });
+              const raw = (res?.body?.data && (res.body.data.memories || res.body.data.MEMORIES)) || '[]';
+              try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) allRecords.push(parsed);
+              } catch {
+                // skip bad
+              }
+            } catch {
+              // not found - skip
+            }
           }
         }
 
-        // merge using helper
         const merged = memlib.mergeMemories(...allRecords);
         return {
           content: [{ type: 'text', text: JSON.stringify(merged, null, 2) }],
-          details: { status: 'ok', count: merged.length, memories: merged }
+          details: { status: 'ok', count: merged.length, memories: merged, note: 'results are eventually consistent; use only save_memory/query_memory and do not rely on ConfigMap layout' }
         };
       } catch (e: any) {
         return {
-          content: [{ type: 'text', text: JSON.stringify({ status: 'error', message: 'failed to list or parse memory files', error: String(e?.message || e) }, null, 2) }],
-          details: { status: 'error', message: 'failed to list or parse memory files', error: String(e?.message || e) }
+          content: [{ type: 'text', text: JSON.stringify({ status: 'error', message: 'failed to list or parse memory ConfigMaps', error: String(e?.message || e) }, null, 2) }],
+          details: { status: 'error', message: 'failed to list or parse memory ConfigMaps', error: String(e?.message || e) }
         };
       }
     }
