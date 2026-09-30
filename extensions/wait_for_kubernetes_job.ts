@@ -8,6 +8,52 @@ import {
 const DEFAULT_NAMESPACE = 'default';
 
 export default function registerWaitForKubernetesJob(pi: any) {
+  const RUNTIME_SKILL_NAME = 'wait-for-kubernetes-job-runtime';
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-wait-for-kube-job-'));
+  let skillPathPromise: Promise<string> | null = null;
+
+  function writeSkill(rootDir: string, skillName: string, content: string) {
+    const skillDir = path.join(rootDir, skillName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+    return skillDir;
+  }
+
+  function renderRuntimeSkill() {
+    return `---
+name: ${RUNTIME_SKILL_NAME}
+description: Runtime snapshot describing the wait_for_kubernetes_job tool for this worker execution.
+---
+
+# wait_for_kubernetes_job (runtime)
+
+This generated runtime skill documents the built-in native tool ` + "`wait_for_kubernetes_job`" + ` available to the agent in this worker run.
+
+Use the wait_for_kubernetes_job tool to poll a Kubernetes Job until it succeeds, fails, or a timeout elapses and receive a concise JSON summary.
+
+Example:
+  wait_for_kubernetes_job { "jobName": "my-job", "namespace": "default", "timeoutSeconds": 300 }
+
+`;
+  }
+
+  pi.on('resources_discover', async () => {
+    if (!skillPathPromise) {
+      skillPathPromise = (async () => writeSkill(skillRoot, RUNTIME_SKILL_NAME, renderRuntimeSkill()))();
+    }
+
+    return {
+      skillPaths: [await skillPathPromise]
+    };
+  });
+
+  pi.on('session_shutdown', async () => {
+    try { fs.rmSync(skillRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  });
+
   pi.registerTool({
     name: 'wait_for_kubernetes_job',
     label: 'Wait for Kubernetes Job',

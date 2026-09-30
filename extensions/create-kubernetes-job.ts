@@ -205,6 +205,51 @@ function buildWorkerArgs(
 }
 
 export default function registerCreateKubernetesJob(pi: any) {
+  const RUNTIME_SKILL_NAME = 'create-kubernetes-job-runtime';
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-create-kube-job-'));
+  let skillPathPromise: Promise<string> | null = null;
+
+  function writeSkill(rootDir: string, skillName: string, content: string) {
+    const skillDir = path.join(rootDir, skillName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+    return skillDir;
+  }
+
+  function renderRuntimeSkill() {
+    return `---
+name: ${RUNTIME_SKILL_NAME}
+description: Runtime snapshot describing the create_kubernetes_job tool for this worker execution.
+---
+
+# create_kubernetes_job (runtime)
+
+This generated runtime skill documents the built-in native tool ` + "`create_kubernetes_job`" + ` available to the agent in this worker run.
+
+Use the create_kubernetes_job tool to create a single Kubernetes Job that runs a pi worker with a supplied prompt and optional flags; the tool ensures a bootstrap ServiceAccount, Role, RoleBinding, and a config Secret are present in the target namespace before creating the Job.
+
+Example:
+  create_kubernetes_job { "jobName": "my-job", "workerPrompt": "Do work", "namespace": "default" }
+
+`;
+  }
+
+  pi.on('resources_discover', async () => {
+    if (!skillPathPromise) {
+      skillPathPromise = (async () => writeSkill(skillRoot, RUNTIME_SKILL_NAME, renderRuntimeSkill()))();
+    }
+
+    return {
+      skillPaths: [await skillPathPromise]
+    };
+  });
+
+  pi.on('session_shutdown', async () => {
+    try { fs.rmSync(skillRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  });
   pi.registerTool({
     name: "create_kubernetes_job",
     label: "Create Kubernetes Job",

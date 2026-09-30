@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { Type } from 'typebox';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const DEFAULT_NAMESPACE_PATH = process.env.NS_PATH || '/var/run/secrets/kubernetes.io/serviceaccount/namespace';
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
@@ -107,6 +110,52 @@ function isConflict(stderr) {
 }
 
 export default function registerExecKubectl(pi) {
+  const RUNTIME_SKILL_NAME = 'exec-kubectl-runtime';
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-exec-kubectl-'));
+  let skillPathPromise = null;
+
+  function writeSkill(rootDir, skillName, content) {
+    const skillDir = path.join(rootDir, skillName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+    return skillDir;
+  }
+
+  function renderExecKubectlSkill() {
+    return `---
+name: ${RUNTIME_SKILL_NAME}
+description: Runtime snapshot describing the exec_kubectl tool for this worker execution.
+---
+
+# exec_kubectl (runtime)
+
+This generated runtime skill documents the built-in native tool ` + "exec_kubectl" + ` available to the agent in this worker run.
+
+Use the exec_kubectl tool to run a single non-interactive kubectl command using the worker's configured KUBECONFIG or in-cluster configuration. Pass the kubectl arguments only (omit the "kubectl" prefix). Example:
+
+	exec_kubectl { "command": "get pods -o json" }
+
+Rules:
+- Commands must be a single non-interactive kubectl invocation (no shell operators like &&, ||, or newlines).
+- To target a namespace explicitly use the "namespace" parameter or rely on the in-cluster namespace when running inside Kubernetes.
+- For apply/replace operations that read STDIN, pass the payload in the "input" parameter.
+- When retrying on resource conflicts, set "retryOnConflict": true and optionally "maxAttempts".
+`;
+  }
+
+  pi.on('resources_discover', async () => {
+    if (!skillPathPromise) {
+      skillPathPromise = (async () => writeSkill(skillRoot, RUNTIME_SKILL_NAME, renderExecKubectlSkill()))();
+    }
+
+    return {
+      skillPaths: [await skillPathPromise]
+    };
+  });
+
+  pi.on('session_shutdown', async () => {
+    try { fs.rmSync(skillRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  });
   pi.registerTool({
     name: 'exec_kubectl',
     label: 'exec_kubectl',

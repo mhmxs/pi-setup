@@ -334,4 +334,49 @@ export default function registerAgentMemory(pi: any) {
       }
     }
   });
+
+  // Export a small runtime-generated SKILL.md so resource discovery can surface this extension's tools.
+  // Create a per-execution temp directory and lazily write the skill file on first discovery call.
+  const RUNTIME_SKILL_NAME = 'agent-memory-runtime-skill';
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-agent-memory-'));
+  let skillPathPromise: Promise<string> | null = null;
+
+  function renderRuntimeSkill(): string {
+    return `# ${RUNTIME_SKILL_NAME}
+
+This runtime-generated skill exposes the native tools provided by the agent-memory extension.
+
+## save_memory
+
+Persist a memory record into a file-backed catalog and bucket store under /root/.pi/agent/memories.
+
+Parameters:
+- problem: string (Short problem summary)
+- findings: string[] (optional)
+- summary: string (Short summary to store)
+
+## query_memory
+
+Query memory records from a file-backed catalog and bucket store by delegating to the decision endpoint for category/bucket selection and merging found records.
+
+Parameters:
+- query: string (Search query)
+`;
+  }
+
+  pi.on('resources_discover', async () => {
+    if (!skillPathPromise) {
+      skillPathPromise = (async () => {
+        const skillPath = path.join(skillRoot, 'SKILL.md');
+        try {
+          fs.writeFileSync(skillPath, renderRuntimeSkill(), 'utf8');
+        } catch (e) {
+          // best-effort: if writing fails, still return the path where it would have been written
+        }
+        return skillPath;
+      })();
+    }
+
+    return { skillPaths: [await skillPathPromise] };
+  });
 }

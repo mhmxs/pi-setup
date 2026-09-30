@@ -6,6 +6,53 @@ import * as crypto from "crypto";
 import * as headlessOutput from "./headless_output.cjs";
 
 export default function (pi: any) {
+  // create a per-execution temporary skill directory and expose a runtime SKILL.md
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-headless-pi-skill-'));
+  let skillPathPromise: Promise<string> | null = null;
+
+  const renderHeadlessSkill = () => `# Headless Pi Runtime Skill
+
+This runtime SKILL.md exposes the native 'run_headless_pi' tool provided by the headless_pi extension.
+
+Tool: ` + "`run_headless_pi`" + `
+
+Description:
+Execute a task in a headless sub-process using pi with TTY allocation.
+
+Parameters:
+- prompt: string — Task instruction or command for the worker (required).
+- cwd: string — Working directory for the worker process (optional).
+- provider: string — Provider to use for the headless pi subprocess (optional).
+- model: string — Model to use for the headless pi subprocess (optional).
+
+Returns:
+An object containing execution metadata and the worker's final answer.
+
+`;
+
+  function writeSkill(rootDir: string, skillName: string, content: string) {
+    const skillDir = path.join(rootDir, skillName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+    return skillDir;
+  }
+
+  pi.on('resources_discover', async () => {
+    if (!skillPathPromise) {
+      skillPathPromise = (async () => {
+        return writeSkill(skillRoot, 'headless-pi-runtime', renderHeadlessSkill());
+      })();
+    }
+
+    return {
+      skillPaths: [await skillPathPromise]
+    };
+  });
+
+  pi.on('session_shutdown', async () => {
+    try { fs.rmSync(skillRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  });
+
   pi.registerTool({
     name: "run_headless_pi",
     description: "Executes a task in a headless sub-process using pi with TTY allocation.",
@@ -222,7 +269,8 @@ export default function (pi: any) {
           });
         };
 
-        const pythonPtyCmd = `import pty, os, sys; pty.spawn(['pi', '--mode', 'json', '--no-extensions', '--extension', 'npm:pi-graft', '--no-session', '--provider', sys.argv[2], '--model', sys.argv[3], '-p', sys.argv[1]])`;
+        const decisionMakerPath = path.join(__dirname, 'decision-maker.ts');
+        const pythonPtyCmd = `import pty, os, sys; pty.spawn(['pi', '--mode', 'json', '--no-extensions', '--extension', 'npm:pi-graft', '--extension', ${JSON.stringify(decisionMakerPath)}, '--no-session', '--provider', sys.argv[2], '--model', sys.argv[3], '-p', sys.argv[1]])`;
 
         const child = spawn("python3", ["-c", pythonPtyCmd, formattedPrompt, provider, model], {
           cwd: targetCwd,

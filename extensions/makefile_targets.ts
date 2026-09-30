@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 // Module-level cache: resolvedMakefilePath -> parsed target records (name + optional help text)
@@ -31,7 +32,53 @@ function parseTargetsFromMakefile(content: string): { name: string; help?: strin
   return targets;
 }
 
+function renderMakefileTargetsSkill() {
+  return `# Makefile Targets (runtime)
+
+This runtime SKILL.md exposes the native 'makefile_targets' tool provided by the extension.
+
+Tool: ` + "`makefile_targets`" + `
+
+Description:
+Discover Makefile targets in a repository and return matching targets, optionally filtered by a query string.
+
+Parameters:
+- query: string (optional) — Case-insensitive substring to filter target names.
+- cwd: string (optional) — Working directory to search for Makefile (defaults to process.cwd()).
+
+Returns:
+An object containing the makefile path, the query, and a list of matching targets (each: name and optional help text).
+`;
+}
+
+function writeSkill(rootDir: string, skillName: string, content: string) {
+  const skillDir = path.join(rootDir, skillName);
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+  return skillDir;
+}
+
 export default function (pi: ExtensionAPI) {
+  // create a per-execution temporary skill directory and expose a runtime SKILL.md
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-makefile-targets-skill-'));
+  let skillPathPromise: Promise<string> | null = null;
+
+  pi.on('resources_discover', async () => {
+    if (!skillPathPromise) {
+      skillPathPromise = (async () => {
+        return writeSkill(skillRoot, 'makefile-targets-runtime', renderMakefileTargetsSkill());
+      })();
+    }
+
+    return {
+      skillPaths: [await skillPathPromise]
+    };
+  });
+
+  pi.on('session_shutdown', async () => {
+    try { fs.rmSync(skillRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  });
+
   pi.registerTool({
     name: "makefile_targets",
     label: "Makefile Targets",
